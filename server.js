@@ -122,7 +122,7 @@ async function replyToLine(replyToken, text) {
 }
 
 // ===== Webhook Endpoint =====
-app.get("/api/webhook", (req, res) => {
+app.get("/webhook", (req, res) => {
   res.status(200).send("🟢 LINE Webhook is running!");
 });
 
@@ -163,3 +163,4 @@ app.post("/api/webhook", async (req, res) => {
 // ✅ แก้ตรงนี้สำหรับ Render — ต้องมี app.listen()
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
