@@ -132,6 +132,7 @@ app.post("/api/webhook", async (req, res) => {
     if (event.type === "message" && event.message.type === "text") {
       const message = event.message.text.trim();
       const userId = event.source.userId;
+       console.log("💬 User:", userId, "Message:", message); 
 
       if (message === "ขอรหัสลูกค้า") {
         await replyToLine(event.replyToken, `รหัสลูกค้าคือ: ${userId}`);
@@ -160,3 +161,4 @@ app.post("/api/webhook", async (req, res) => {
 
 // ✅ Export app for Vercel
 export default app;
+
