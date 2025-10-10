@@ -84,7 +84,9 @@ async function searchUID(keyword, targetConcert = null) {
             }
           }
         } catch (err) {
-          console.log(`⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`);
+          console.log(
+            `⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`
+          );
         }
       }
     } catch (err) {
@@ -158,5 +160,6 @@ app.post("/api/webhook", async (req, res) => {
   }
 });
 
-// ✅ Export app for Vercel
-export default app;
+// ✅ แก้ตรงนี้สำหรับ Render — ต้องมี app.listen()
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
