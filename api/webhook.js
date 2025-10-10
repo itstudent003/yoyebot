@@ -10,9 +10,8 @@ dotenv.config();
 // ===== Google Sheets Setup =====
 const SERVICE_ACCOUNT = JSON.parse(process.env.SERVICE_ACCOUNT_JSON);
 const MASTER_SHEET_ID = process.env.MASTER_SHEET_ID;
-const MASTER_SHEET_NAME = "index"; // Master sheet มี columns: ConcertName | SpreadsheetId
+const MASTER_SHEET_NAME = "index";
 
-// ===== LINE Config =====
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 
 const auth = new JWT({
@@ -26,7 +25,7 @@ const sheets = google.sheets({ version: "v4", auth });
 const app = express();
 app.use(bodyParser.json());
 
-// ✅ อ่าน Mapping จาก Master Sheet (ConcertName -> SpreadsheetId)
+// ===== Utilities =====
 async function getConcertMapping() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: MASTER_SHEET_ID,
@@ -41,12 +40,10 @@ async function getConcertMapping() {
   return map;
 }
 
-// ✅ ค้นหาข้อมูลจากทุกคอนเสิร์ต หรือเฉพาะคอนเสิร์ตที่ระบุ
 async function searchUID(keyword, targetConcert = null) {
   const concertMap = await getConcertMapping();
   let results = [];
 
-  // ถ้ามีระบุชื่อคอนเสิร์ต → จำกัดเฉพาะนั้น
   const targets = targetConcert
     ? Object.entries(concertMap).filter(
         ([name]) => name.trim() === targetConcert.trim()
@@ -58,7 +55,6 @@ async function searchUID(keyword, targetConcert = null) {
 
   for (const [concertName, sheetId] of targets) {
     try {
-      // 📘 ดึงชื่อแท็บทั้งหมด
       const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
       const sheetNames = meta.data.sheets.map((s) => s.properties.title);
 
@@ -71,13 +67,11 @@ async function searchUID(keyword, targetConcert = null) {
 
           const rows = res.data.values || [];
           for (const row of rows) {
-            const order = row[0]; // A = ลำดับคิว
-            const name = row[2]; // C = ชื่อ
-            const phone = row[3]; // D = เบอร์
-            const uid = row[4]; // E = UID
+            const order = row[0];
+            const name = row[2];
+            const phone = row[3];
+            const uid = row[4];
 
-            // ✅ เงื่อนไขใหม่:
-            // ถ้าไม่ได้ระบุคอนเสิร์ต → ห้ามค้นหาด้วย "ลำดับคิว"
             const matchByOrder =
               targetConcert && order && order.toString() === keyword;
             const matchByName = name && name.includes(keyword);
@@ -90,9 +84,7 @@ async function searchUID(keyword, targetConcert = null) {
             }
           }
         } catch (err) {
-          console.log(
-            `⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`
-          );
+          console.log(`⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`);
         }
       }
     } catch (err) {
@@ -110,7 +102,6 @@ async function searchUID(keyword, targetConcert = null) {
   return results.join("\n\n");
 }
 
-// ✅ ตอบกลับ LINE
 async function replyToLine(replyToken, text) {
   const url = "https://api.line.me/v2/bot/message/reply";
   const payload = JSON.stringify({
@@ -128,8 +119,12 @@ async function replyToLine(replyToken, text) {
   });
 }
 
-// ===== Webhook =====
-app.post("/webhook", async (req, res) => {
+// ===== Webhook Endpoint =====
+app.get("/api/webhook", (req, res) => {
+  res.status(200).send("🟢 LINE Webhook is running!");
+});
+
+app.post("/api/webhook", async (req, res) => {
   res.status(200).send("OK");
 
   const events = req.body.events || [];
@@ -138,22 +133,17 @@ app.post("/webhook", async (req, res) => {
       const message = event.message.text.trim();
       const userId = event.source.userId;
 
-      // ✅ ขอรหัสลูกค้า
       if (message === "ขอรหัสลูกค้า") {
         await replyToLine(event.replyToken, `รหัสลูกค้าคือ: ${userId}`);
-      }
-
-      // ✅ ค้นหา UID จากทุกชีต
-      else if (message.startsWith("ค้นหา")) {
-        // แยกข้อความ เช่น "ค้นหา itstudent ใน SupalaiConcert"
+      } else if (message.startsWith("ค้นหา")) {
         const match = message.match(/^ค้นหา\s+(.+?)(?:\s+ใน\s+(.+))?$/);
         if (!match) {
           await replyToLine(
             event.replyToken,
             `⚠️ รูปแบบที่ถูกต้อง:\n` +
-              `• ค้นหา [ชื่อ] หรือ [เบอร์โทร] → ค้นหาทุกคอนเสิร์ตในระบบ\n` +
+              `• ค้นหา [ชื่อ] หรือ [เบอร์โทร] → ค้นหาทุกคอนเสิร์ต\n` +
               `• ค้นหา [คำค้น] ใน [ชื่อคอนเสิร์ต] → ค้นหาเฉพาะคอนเสิร์ตนั้น\n` +
-              `\n📌 หมายเหตุ: การค้นหาด้วย "ลำดับคิว" (เช่น ค้นหา 5) จะใช้ได้เฉพาะเมื่อระบุชื่อคอนเสิร์ตเท่านั้น\n` +
+              `\n📌 การค้นหาด้วย "ลำดับคิว" ใช้ได้เฉพาะเมื่อระบุชื่อคอนเสิร์ตเท่านั้น\n` +
               `ตัวอย่าง:\nค้นหา itstudent\nค้นหา itstudent ใน SupalaiConcert\nค้นหา 5 ใน Blackpink2025`
           );
           return;
@@ -161,22 +151,12 @@ app.post("/webhook", async (req, res) => {
 
         const keyword = match[1].trim();
         const targetConcert = match[2]?.trim() || null;
-
         const result = await searchUID(keyword, targetConcert);
         await replyToLine(event.replyToken, result);
       }
-
-      //   // ❌ ไม่เข้าเงื่อนไข
-      //   else {
-      //     await replyToLine(
-      //       event.replyToken,
-      //       `พิมพ์ "ขอรหัสลูกค้า" เพื่อดู UID หรือ "ค้นหา [คำค้น]" เพื่อค้นหาในทุกคอนเสิร์ต`
-      //     );
-      //   }
     }
   }
 });
 
-// ===== Start Server =====
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// ✅ Export app for Vercel
+export default app;
