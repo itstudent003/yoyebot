@@ -122,7 +122,7 @@ async function replyToLine(replyToken, text) {
 }
 
 // ===== Webhook Endpoint =====
-app.get("/webhook", (req, res) => {
+app.get("/api/webhook", (req, res) => {
   res.status(200).send("🟢 LINE Webhook is running!");
 });
 
@@ -131,10 +131,99 @@ app.post("/api/webhook", async (req, res) => {
 
   const events = req.body.events || [];
   for (const event of events) {
+    const source = event.source || {};
+
+    // ✅ กรณีบอทถูกเชิญเข้ากลุ่ม
+    if (event.type === "join" && source.type === "group") {
+      console.log("🆕 Bot ถูกเชิญเข้ากลุ่มใหม่!");
+      console.log("📌 Group ID:", source.groupId);
+
+      // (เลือกได้) ส่งข้อความแจ้งในกลุ่ม
+      await replyToLine(
+        event.replyToken,
+        `✅ บอทพร้อมใช้งานแล้วในกลุ่มนี้!\nGroup ID: ${source.groupId}`
+      );
+      continue;
+    }
+
+    // ✅ กรณีบอทได้รับข้อความจากกลุ่ม
     if (event.type === "message" && event.message.type === "text") {
       const message = event.message.text.trim();
       const userId = event.source.userId;
 
+      // ✅ เมื่อผู้ใช้พิมพ์ "หยุดกดได้เลย"
+      if (/หยุดกดได้เลย/i.test(message)) {
+        console.log(`🛑 ผู้ใช้ ${userId} แจ้งหยุดกดแล้ว`);
+
+        // ค้นหาในทุกชีต
+        const concertMap = await getConcertMapping();
+        for (const [concertName, sheetId] of Object.entries(concertMap)) {
+          try {
+            const res = await sheets.spreadsheets.values.get({
+              spreadsheetId: sheetId,
+              range: "A2:O", // ขยายให้ถึงคอลัมน์ N
+            });
+
+            const rows = res.data.values || [];
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              const uidCell = row[4]; // คอลัมน์ E (UID)
+
+              if (uidCell === userId) {
+                console.log(`✅ พบ UID ใน ${concertName}, แถว ${i + 2}`);
+
+                // ✅ อัปเดตคอลัมน์ N เป็น TRUE
+                await sheets.spreadsheets.values.update({
+                  spreadsheetId: sheetId,
+                  range: `N${i + 2}`,
+                  valueInputOption: "USER_ENTERED", // ✅ สำคัญ
+                  requestBody: { values: [[true]] }, // ✅ ใช้ค่า boolean จริง
+                });
+
+                // ✅ ส่งข้อความเข้ากลุ่ม LINE
+                const fileName = concertName;
+                const roundDate = row[6] || "-"; // คอลัมน์ G
+                const queueNo = row[0] || "-";
+                const operator = "ลูกค้า (ผ่าน LINE OA)";
+                const notifiedAt = new Date().toLocaleString("th-TH", {
+                  timeZone: "Asia/Bangkok",
+                });
+
+                const groupMessage =
+                  `[🛑 หยุดกด – ลูกค้าได้บัตรเองแล้ว]\n\n` +
+                  `งาน: ${fileName}\n` +
+                  `คิว: ${queueNo}\n` +
+                  `รอบการแสดง: ${roundDate}\n` +
+                  `ลูกค้า: (UID: ${userId})\n` +
+                  `โดย: ${operator} | เวลา: ${notifiedAt}`;
+
+                await fetch("https://api.line.me/v2/bot/message/push", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
+                  },
+                  body: JSON.stringify({
+                    to: process.env.LINE_GROUP_ID, // ตั้งค่าไว้ใน .env
+                    messages: [{ type: "text", text: groupMessage }],
+                  }),
+                });
+
+                console.log("📩 ส่งแจ้งเตือนไปกลุ่มเรียบร้อย");
+                return;
+              }
+            }
+          } catch (err) {
+            console.error(`⚠️ อ่านชีต ${concertName} ไม่ได้:`, err.message);
+          }
+        }
+
+        // ❌ ถ้าไม่พบ UID
+        await replyToLine(event.replyToken, "❌ ไม่พบข้อมูลในระบบค่ะ");
+        continue;
+      }
+
+      // ✅ คำสั่งอื่น (เดิม)
       if (message === "ขอรหัสลูกค้า") {
         await replyToLine(event.replyToken, `รหัสลูกค้าคือ: ${userId}`);
       } else if (message.startsWith("ค้นหา")) {
@@ -145,8 +234,7 @@ app.post("/api/webhook", async (req, res) => {
             `⚠️ รูปแบบที่ถูกต้อง:\n` +
               `• ค้นหา [ชื่อ] หรือ [เบอร์โทร] → ค้นหาทุกคอนเสิร์ต\n` +
               `• ค้นหา [คำค้น] ใน [ชื่อคอนเสิร์ต] → ค้นหาเฉพาะคอนเสิร์ตนั้น\n` +
-              `\n📌 การค้นหาด้วย "ลำดับคิว" ใช้ได้เฉพาะเมื่อระบุชื่อคอนเสิร์ตเท่านั้น\n` +
-              `ตัวอย่าง:\nค้นหา itstudent\nค้นหา itstudent ใน SupalaiConcert\nค้นหา 5 ใน Blackpink2025`
+              `\n📌 ตัวอย่าง:\nค้นหา itstudent\nค้นหา itstudent ใน SupalaiConcert`
           );
           return;
         }
@@ -163,4 +251,3 @@ app.post("/api/webhook", async (req, res) => {
 // ✅ แก้ตรงนี้สำหรับ Render — ต้องมี app.listen()
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-
