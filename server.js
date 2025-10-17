@@ -88,6 +88,20 @@ app.post("/api/webhook", async (req, res) => {
   res.status(200).send("OK");
 
   const events = req.body.events || [];
+
+  // ✅ Forward event ทั้งหมดไปยัง Thunder webhook
+  try {
+    await fetch("https://line.thunder.in.th/api/v1/webhook/e4a3587a-9a99-40f1-8efa-3582c8a47db4", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+    });
+    console.log("✅ Forwarded to Thunder webhook");
+  } catch (err) {
+    console.error("❌ Error forwarding to Thunder:", err.message);
+  }
+
+  // ✅ เริ่มทำงาน logic เดิมของคุณ
   for (const event of events) {
     const source = event.source || {};
 
@@ -279,3 +293,4 @@ async function searchUID(keyword, targetConcert = null) {
 // ===== Start Server =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
