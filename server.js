@@ -11,8 +11,6 @@ dotenv.config();
 const SERVICE_ACCOUNT = JSON.parse(process.env.SERVICE_ACCOUNT_JSON);
 const MASTER_SHEET_ID = process.env.MASTER_SHEET_ID;
 const MASTER_SHEET_NAME = "index";
-const LOG_SHEET_ID = process.env.LOG_SHEET_ID; // ✅ ชีตเก็บ Logs
-const LOG_SHEET_NAME = "Logs";
 
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 
@@ -42,192 +40,6 @@ async function getConcertMapping() {
   return map;
 }
 
-async function logEvent(eventName, role, email, name, adminUID, customerUID) {
-  try {
-    const timestamp = new Date().toLocaleString("th-TH", {
-      timeZone: "Asia/Bangkok",
-    });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: LOG_SHEET_ID,
-      range: LOG_SHEET_NAME,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[timestamp, eventName, role, email, name, adminUID, customerUID]],
-      },
-    });
-    console.log("🧾 Log saved:", eventName);
-  } catch (err) {
-    console.error("❌ Error logging event:", err.message);
-  }
-}
-
-async function replyToLine(replyToken, text) {
-  const url = "https://api.line.me/v2/bot/message/reply";
-  const payload = JSON.stringify({
-    replyToken,
-    messages: [{ type: "text", text }],
-  });
-
-  await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
-    },
-    body: payload,
-  });
-}
-
-// ===== Webhook Endpoint =====
-app.get("/api/webhook", (req, res) => {
-  res.status(200).send("🟢 LINE Webhook is running!");
-});
-
-app.post("/api/webhook", async (req, res) => {
-  res.status(200).send("OK");
-
-  const events = req.body.events || [];
-
-  // ✅ Forward event ทั้งหมดไปยัง Thunder webhook
-  try {
-    await fetch("https://line.thunder.in.th/api/v1/webhook/e4a3587a-9a99-40f1-8efa-3582c8a47db4", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body),
-    });
-    console.log("✅ Forwarded to Thunder webhook");
-  } catch (err) {
-    console.error("❌ Error forwarding to Thunder:", err.message);
-  }
-
-  // ✅ เริ่มทำงาน logic เดิมของคุณ
-  for (const event of events) {
-    const source = event.source || {};
-
-    // ✅ เมื่อบอทถูกเชิญเข้ากลุ่ม
-    if (event.type === "join" && source.type === "group") {
-      console.log("🆕 Bot ถูกเชิญเข้ากลุ่มใหม่!");
-      console.log("📌 Group ID:", source.groupId);
-      await replyToLine(
-        event.replyToken,
-        `✅ บอทพร้อมใช้งานแล้วในกลุ่มนี้!\nGroup ID: ${source.groupId}`
-      );
-      continue;
-    }
-
-    // ✅ เมื่อบอทได้รับข้อความ
-    if (event.type === "message" && event.message.type === "text") {
-      const message = event.message.text.trim();
-      const userId = event.source.userId;
-
-      // ✅ เมื่อผู้ใช้พิมพ์ “หยุดกดได้เลย”
-      if (/หยุดกดได้เลย/i.test(message)) {
-        console.log(`🛑 ผู้ใช้ ${userId} แจ้งหยุดกดแล้ว`);
-
-        const concertMap = await getConcertMapping();
-        for (const [concertName, sheetId] of Object.entries(concertMap)) {
-          try {
-            const res = await sheets.spreadsheets.values.get({
-              spreadsheetId: sheetId,
-              range: "A2:O",
-            });
-
-            const rows = res.data.values || [];
-            for (let i = 0; i < rows.length; i++) {
-              const row = rows[i];
-              const uidCell = row[4]; // E
-              if (uidCell === userId) {
-                console.log(`✅ พบ UID ใน ${concertName}, แถว ${i + 2}`);
-
-                // ✅ อัปเดตคอลัมน์ N (หยุดกด)
-                await sheets.spreadsheets.values.update({
-                  spreadsheetId: sheetId,
-                  range: `N${i + 2}`,
-                  valueInputOption: "USER_ENTERED",
-                  requestBody: { values: [[true]] },
-                });
-
-                const fileName = concertName;
-                const roundDate = row[6] || "-"; // G
-                const queueNo = row[0] || "-";
-                const operator = "ลูกค้า (ผ่าน LINE OA)";
-                const notifiedAt = new Date().toLocaleString("th-TH", {
-                  timeZone: "Asia/Bangkok",
-                });
-
-                // ✅ แจ้งกลุ่ม LINE
-                const groupMessage =
-                  `[🛑 หยุดกด – ลูกค้าได้บัตรเองแล้ว]\n\n` +
-                  `งาน: ${fileName}\n` +
-                  `คิว: ${queueNo}\n` +
-                  `รอบการแสดง: ${roundDate}\n` +
-                  `ลูกค้า: (UID: ${userId})\n` +
-                  `โดย: ${operator} | เวลา: ${notifiedAt}`;
-
-                await fetch("https://api.line.me/v2/bot/message/push", {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
-                  },
-                  body: JSON.stringify({
-                    to: process.env.LINE_GROUP_ID,
-                    messages: [{ type: "text", text: groupMessage }],
-                  }),
-                });
-
-                console.log("📩 ส่งแจ้งเตือนไปกลุ่มเรียบร้อย");
-
-                // ✅ บันทึก Log
-                const eventName = `หยุดกด (ลูกค้าได้บัตรเอง) - ${fileName} / รอบ: ${roundDate}`;
-                await logEvent(
-                  eventName,
-                  "Customer",
-                  "-",
-                  "-",
-                  "-",
-                  userId
-                );
-
-                return;
-              }
-            }
-          } catch (err) {
-            console.error(`⚠️ อ่านชีต ${concertName} ไม่ได้:`, err.message);
-          }
-        }
-
-        await replyToLine(event.replyToken, "❌ ไม่พบข้อมูลในระบบค่ะ");
-        continue;
-      }
-
-      // ✅ คำสั่งอื่น (ค้นหา / ขอรหัส)
-      if (message === "ขอรหัสลูกค้า") {
-        await replyToLine(event.replyToken, `รหัสลูกค้าคือ: ${userId}`);
-      } else if (message.startsWith("ค้นหา")) {
-        const match = message.match(/^ค้นหา\s+(.+?)(?:\s+ใน\s+(.+))?$/);
-        if (!match) {
-          await replyToLine(
-            event.replyToken,
-            `⚠️ รูปแบบที่ถูกต้อง:\n` +
-              `• ค้นหา [ชื่อ] หรือ [เบอร์โทร] → ค้นหาทุกคอนเสิร์ต\n` +
-              `• ค้นหา [คำค้น] ใน [ชื่อคอนเสิร์ต] → ค้นหาเฉพาะคอนเสิร์ตนั้น\n` +
-              `\n📌 ตัวอย่าง:\nค้นหา itstudent\nค้นหา itstudent ใน SupalaiConcert`
-          );
-          return;
-        }
-
-        const keyword = match[1].trim();
-        const targetConcert = match[2]?.trim() || null;
-        const result = await searchUID(keyword, targetConcert);
-        await replyToLine(event.replyToken, result);
-      }
-    }
-  }
-});
-
-// ===== ฟังก์ชัน Search UID (เดิม) =====
 async function searchUID(keyword, targetConcert = null) {
   const concertMap = await getConcertMapping();
   let results = [];
@@ -259,10 +71,12 @@ async function searchUID(keyword, targetConcert = null) {
             const name = row[2];
             const phone = row[3];
             const uid = row[4];
+
             const matchByOrder =
               targetConcert && order && order.toString() === keyword;
             const matchByName = name && name.includes(keyword);
             const matchByPhone = phone && phone.includes(keyword);
+
             if (matchByOrder || matchByName || matchByPhone) {
               results.push(
                 `🎟️ [${concertName} - ${sheetName}]\nลำดับ: ${order}\nชื่อ: ${name}\nเบอร์: ${phone}\nUID: ${uid}`
@@ -270,9 +84,7 @@ async function searchUID(keyword, targetConcert = null) {
             }
           }
         } catch (err) {
-          console.log(
-            `⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`
-          );
+          console.log(`⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`);
         }
       }
     } catch (err) {
@@ -290,7 +102,142 @@ async function searchUID(keyword, targetConcert = null) {
   return results.join("\n\n");
 }
 
-// ===== Start Server =====
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+async function replyToLine(replyToken, text) {
+  const url = "https://api.line.me/v2/bot/message/reply";
+  const payload = JSON.stringify({
+    replyToken,
+    messages: [{ type: "text", text }],
+  });
 
+  await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
+    },
+    body: payload,
+  });
+}
+
+// ===== Webhook Endpoint =====
+app.get("/api/webhook", (req, res) => {
+  res.status(200).send("🟢 LINE Webhook is running!");
+});
+
+// ===== Webhook Endpoint =====
+app.post("/api/webhook", async (req, res) => {
+  res.status(200).send("OK");
+
+  const events = req.body.events || [];
+
+  for (const event of events) {
+    if (event.type === "message" && event.message.type === "text") {
+      const message = event.message.text.trim();
+      const userId = event.source.userId;
+
+      if (message === "ขอรหัสลูกค้า") {
+        await replyToLine(event.replyToken, `รหัสลูกค้าคือ: ${userId}`);
+      } else if (message.startsWith("ค้นหา")) {
+        const match = message.match(/^ค้นหา\s+(.+?)(?:\s+ใน\s+(.+))?$/);
+        if (!match) {
+          await replyToLine(
+            event.replyToken,
+            `⚠️ รูปแบบที่ถูกต้อง:\n` +
+              `• ค้นหา [ชื่อ] หรือ [เบอร์โทร] → ค้นหาทุกคอนเสิร์ต\n` +
+              `• ค้นหา [คำค้น] ใน [ชื่อคอนเสิร์ต] → ค้นหาเฉพาะคอนเสิร์ตนั้น\n` +
+              `\n📌 การค้นหาด้วย "ลำดับคิว" ใช้ได้เฉพาะเมื่อระบุชื่อคอนเสิร์ตเท่านั้น\n` +
+              `ตัวอย่าง:\nค้นหา itstudent\nค้นหา itstudent ใน SupalaiConcert\nค้นหา 5 ใน Blackpink2025`
+          );
+          return;
+        }
+
+        const keyword = match[1].trim();
+        const targetConcert = match[2]?.trim() || null;
+        const result = await searchUID(keyword, targetConcert);
+        await replyToLine(event.replyToken, result);
+      }
+
+      // ✅ เพิ่มส่วนนี้: ตรวจสลิปด้วย Thunder API
+    } else if (event.type === "message" && event.message.type === "image") {
+      try {
+        const messageId = event.message.id;
+        const userId = event.source.userId;
+
+        // ดึงไฟล์รูปจาก LINE
+        const imageRes = await fetch(
+          `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+          {
+            headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}` },
+          }
+        );
+
+        if (!imageRes.ok) throw new Error("โหลดรูปจาก LINE ไม่สำเร็จ");
+
+        const buffer = Buffer.from(await imageRes.arrayBuffer());
+
+        // ส่งรูปไปตรวจที่ Thunder API
+        const formData = new FormData();
+        formData.append("file", buffer, {
+          filename: "slip.jpg",
+          contentType: "image/jpeg",
+        });
+
+        const thunderRes = await fetch("https://api.thunder.in.th/v1/verify", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.THUNDER_API_KEY || ""}`, // ใส่ถ้ามี API key
+            ...formData.getHeaders(),
+          },
+          body: formData,
+        });
+
+        const result = await thunderRes.json();
+        console.log("📩 ผลจาก Thunder:", result);
+
+        // ตอบกลับผู้ใช้ตามผลตรวจ
+        if (result.status === 200 && result.data) {
+          const { amount, date, sender, receiver, transRef } = result.data;
+
+          const senderBank = sender?.bank?.short || sender?.bank?.name || "-";
+          const senderAcc = sender?.account?.number || "-";
+          const receiverBank =
+            receiver?.bank?.short || receiver?.bank?.name || "-";
+          const receiverAcc = receiver?.account?.number || "-";
+          const amountValue = amount?.amount || "-";
+
+          const formattedDate = new Date(date).toLocaleString("th-TH", {
+            timeZone: "Asia/Bangkok",
+          });
+
+          const message =
+            `✅ ตรวจสลิปสำเร็จค่ะ\n\n` +
+            `📅 วันที่โอน: ${formattedDate}\n` +
+            `💰 ยอดโอน: ${amountValue} บาท\n` +
+            `🏦 จาก: ${senderBank} (${senderAcc})\n` +
+            `➡️ ถึง: ${receiverBank} (${receiverAcc})\n` +
+            `🔖 รหัสอ้างอิง: ${transRef}`;
+
+          await replyToLine(event.replyToken, message);
+        } else {
+          console.log(
+            "⚠️ Thunder API response ไม่ตรง format ที่คาดไว้:",
+            result
+          );
+          await replyToLine(
+            event.replyToken,
+            "❌ ไม่สามารถตรวจสอบสลิปได้ค่ะ ลองใหม่อีกครั้ง"
+          );
+        }
+      } catch (err) {
+        console.error("❌ ตรวจสลิปล้มเหลว:", err);
+        await replyToLine(
+          event.replyToken,
+          "⚠️ เกิดข้อผิดพลาดระหว่างตรวจสอบสลิปค่ะ"
+        );
+      }
+    }
+  }
+});
+
+// ✅ Export app for Vercel
+export default app;
