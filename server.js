@@ -12,6 +12,8 @@ dotenv.config();
 const SERVICE_ACCOUNT = JSON.parse(process.env.SERVICE_ACCOUNT_JSON);
 const MASTER_SHEET_ID = process.env.MASTER_SHEET_ID;
 const MASTER_SHEET_NAME = "index";
+const LOG_SHEET_ID = process.env.LOG_SHEET_ID; // ✅ ชีตเก็บ Logs
+const LOG_SHEET_NAME = "Logs";
 
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 
@@ -41,66 +43,26 @@ async function getConcertMapping() {
   return map;
 }
 
-async function searchUID(keyword, targetConcert = null) {
-  const concertMap = await getConcertMapping();
-  let results = [];
+async function logEvent(eventName, role, email, name, adminUID, customerUID) {
+  try {
+    const timestamp = new Date().toLocaleString("th-TH", {
+      timeZone: "Asia/Bangkok",
+    });
 
-  const targets = targetConcert
-    ? Object.entries(concertMap).filter(
-        ([name]) => name.trim() === targetConcert.trim()
-      )
-    : Object.entries(concertMap);
-
-  if (targets.length === 0)
-    return `❌ ไม่พบคอนเสิร์ตชื่อ "${targetConcert}" ใน Master Sheet`;
-
-  for (const [concertName, sheetId] of targets) {
-    try {
-      const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
-      const sheetNames = meta.data.sheets.map((s) => s.properties.title);
-
-      for (const sheetName of sheetNames) {
-        try {
-          const res = await sheets.spreadsheets.values.get({
-            spreadsheetId: sheetId,
-            range: `${sheetName}!A2:E`,
-          });
-
-          const rows = res.data.values || [];
-          for (const row of rows) {
-            const order = row[0];
-            const name = row[2];
-            const phone = row[3];
-            const uid = row[4];
-
-            const matchByOrder =
-              targetConcert && order && order.toString() === keyword;
-            const matchByName = name && name.includes(keyword);
-            const matchByPhone = phone && phone.includes(keyword);
-
-            if (matchByOrder || matchByName || matchByPhone) {
-              results.push(
-                `🎟️ [${concertName} - ${sheetName}]\nลำดับ: ${order}\nชื่อ: ${name}\nเบอร์: ${phone}\nUID: ${uid}`
-              );
-            }
-          }
-        } catch (err) {
-          console.log(`⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`);
-        }
-      }
-    } catch (err) {
-      console.log(`⚠️ อ่านไฟล์ ${concertName} ไม่ได้: ${err.message}`);
-    }
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: LOG_SHEET_ID,
+      range: LOG_SHEET_NAME,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [
+          [timestamp, eventName, role, email, name, adminUID, customerUID],
+        ],
+      },
+    });
+    console.log("🧾 Log saved:", eventName);
+  } catch (err) {
+    console.error("❌ Error logging event:", err.message);
   }
-
-  if (results.length === 0)
-    return `❌ ไม่พบ "${keyword}" ใน${
-      targetConcert
-        ? `คอนเสิร์ต "${targetConcert}"`
-        : "ทุกคอนเสิร์ตใน Master Sheet"
-    }`;
-
-  return results.join("\n\n");
 }
 
 async function replyToLine(replyToken, text) {
@@ -125,7 +87,6 @@ app.get("/api/webhook", (req, res) => {
   res.status(200).send("🟢 LINE Webhook is running!");
 });
 
-// ===== Webhook Endpoint =====
 app.post("/api/webhook", async (req, res) => {
   res.status(200).send("OK");
 
@@ -240,5 +201,69 @@ app.post("/api/webhook", async (req, res) => {
   }
 });
 
-// ✅ Export app for Vercel
-export default app;
+// ===== ฟังก์ชัน Search UID (เดิม) =====
+async function searchUID(keyword, targetConcert = null) {
+  const concertMap = await getConcertMapping();
+  let results = [];
+
+  const targets = targetConcert
+    ? Object.entries(concertMap).filter(
+        ([name]) => name.trim() === targetConcert.trim()
+      )
+    : Object.entries(concertMap);
+
+  if (targets.length === 0)
+    return `❌ ไม่พบคอนเสิร์ตชื่อ "${targetConcert}" ใน Master Sheet`;
+
+  for (const [concertName, sheetId] of targets) {
+    try {
+      const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
+      const sheetNames = meta.data.sheets.map((s) => s.properties.title);
+
+      for (const sheetName of sheetNames) {
+        try {
+          const res = await sheets.spreadsheets.values.get({
+            spreadsheetId: sheetId,
+            range: `${sheetName}!A2:E`,
+          });
+
+          const rows = res.data.values || [];
+          for (const row of rows) {
+            const order = row[0];
+            const name = row[2];
+            const phone = row[3];
+            const uid = row[4];
+            const matchByOrder =
+              targetConcert && order && order.toString() === keyword;
+            const matchByName = name && name.includes(keyword);
+            const matchByPhone = phone && phone.includes(keyword);
+            if (matchByOrder || matchByName || matchByPhone) {
+              results.push(
+                `🎟️ [${concertName} - ${sheetName}]\nลำดับ: ${order}\nชื่อ: ${name}\nเบอร์: ${phone}\nUID: ${uid}`
+              );
+            }
+          }
+        } catch (err) {
+          console.log(
+            `⚠️ อ่านแท็บ ${sheetName} ของ ${concertName} ไม่ได้: ${err.message}`
+          );
+        }
+      }
+    } catch (err) {
+      console.log(`⚠️ อ่านไฟล์ ${concertName} ไม่ได้: ${err.message}`);
+    }
+  }
+
+  if (results.length === 0)
+    return `❌ ไม่พบ "${keyword}" ใน${
+      targetConcert
+        ? `คอนเสิร์ต "${targetConcert}"`
+        : "ทุกคอนเสิร์ตใน Master Sheet"
+    }`;
+
+  return results.join("\n\n");
+}
+
+// ===== Start Server =====
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
