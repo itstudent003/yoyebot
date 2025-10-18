@@ -163,12 +163,12 @@ app.get("/api/webhook", (req, res) => {
 app.post("/api/webhook", async (req, res) => {
   res.status(200).send("OK");
   const events = req.body.events || [];
-  const userId = event.source.userId;
 
   for (const event of events) {
     // ===== TEXT MESSAGE =====
     if (event.type === "message" && event.message.type === "text") {
       const message = event.message.text.trim();
+      const userId = event.source.userId;
          // ✅ เมื่อผู้ใช้พิมพ์ “หยุดกดได้เลย”
       if (/หยุดกดได้เลย/i.test(message)) {
         console.log(`🛑 ผู้ใช้ ${userId} แจ้งหยุดกดแล้ว`);
@@ -437,3 +437,4 @@ app.post("/api/push-line", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
