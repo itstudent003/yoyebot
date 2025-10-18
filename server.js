@@ -320,7 +320,42 @@ app.post("/api/webhook", async (req, res) => {
     }
   }
 });
+app.post("/api/push-line", async (req, res) => {
+  try {
+    const { uid, message } = req.body;
+
+    if (!uid || !message) {
+      return res.status(400).json({ error: "Missing uid or message" });
+    }
+
+    // 🔹 ส่ง LINE แบบ push ทันที
+    const linePush = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify({
+        to: uid,
+        messages: [{ type: "text", text: message }],
+      }),
+    });
+
+    if (!linePush.ok) {
+      const errMsg = await linePush.text();
+      console.error("❌ Error sending LINE:", errMsg);
+      return res.status(500).json({ error: "LINE push failed", details: errMsg });
+    }
+
+    console.log(`📤 ส่งข้อความถึง ${uid}`);
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error("❌ Push error:", err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
 
