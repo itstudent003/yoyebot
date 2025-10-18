@@ -124,13 +124,12 @@ async function searchUID(uid, concertName) {
           const uidValue = row[4]; // ✅ คอลัมน์ E = UID
           const nameValue = row[2]; // ชื่อผู้จอง
           const zoneValue = row[11]; // ✅ คอลัมน์ L = Zone ที่นั่ง
-          const amount = row[7];       // ✅ จำนวน (H)
-          const price = row[8];        // ✅ ราคาบัตร (I)
+          const amount = row[7]; // ✅ จำนวน (H)
+          const price = row[8]; // ✅ ราคาบัตร (I)
           const orderLink = row[12]; // ✅ สมมติคอลัมน์ M = ลิงก์คำสั่งซื้อ
           const round = row[6]; //✅ คอลัมน์ G = รอบการแสดง
           if (uidValue && uidValue.trim() === uid.trim()) {
-            
-             return (
+            return (
               `♡ 𝚞𝚙𝚍𝚊𝚝𝚎 : แจ้งที่นั่งแล้วน้า ♡ 𓈒 ᐟ 🎟️✨\n` +
               `🎟️ งาน: ${concert}\n` +
               `📅 วันแสดง: ${round || "-"}\n` +
@@ -164,11 +163,92 @@ app.get("/api/webhook", (req, res) => {
 app.post("/api/webhook", async (req, res) => {
   res.status(200).send("OK");
   const events = req.body.events || [];
+  const userId = event.source.userId;
 
   for (const event of events) {
     // ===== TEXT MESSAGE =====
     if (event.type === "message" && event.message.type === "text") {
       const message = event.message.text.trim();
+         // ✅ เมื่อผู้ใช้พิมพ์ “หยุดกดได้เลย”
+      if (/หยุดกดได้เลย/i.test(message)) {
+        console.log(`🛑 ผู้ใช้ ${userId} แจ้งหยุดกดแล้ว`);
+
+        const concertMap = await getConcertMapping();
+        for (const [concertName, sheetId] of Object.entries(concertMap)) {
+          try {
+            const res = await sheets.spreadsheets.values.get({
+              spreadsheetId: sheetId,
+              range: "A2:O",
+            });
+
+            const rows = res.data.values || [];
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              const uidCell = row[4]; // E
+              if (uidCell === userId) {
+                console.log(`✅ พบ UID ใน ${concertName}, แถว ${i + 2}`);
+
+                // ✅ อัปเดตคอลัมน์ N (หยุดกด)
+                await sheets.spreadsheets.values.update({
+                  spreadsheetId: sheetId,
+                  range: `N${i + 2}`,
+                  valueInputOption: "USER_ENTERED",
+                  requestBody: { values: [[true]] },
+                });
+
+                const fileName = concertName;
+                const roundDate = row[6] || "-"; // G
+                const queueNo = row[0] || "-";
+                const operator = "ลูกค้า (ผ่าน LINE OA)";
+                const notifiedAt = new Date().toLocaleString("th-TH", {
+                  timeZone: "Asia/Bangkok",
+                });
+
+                // ✅ แจ้งกลุ่ม LINE
+                const groupMessage =
+                  `[🛑 หยุดกด – ลูกค้าได้บัตรเองแล้ว]\n\n` +
+                  `งาน: ${fileName}\n` +
+                  `คิว: ${queueNo}\n` +
+                  `รอบการแสดง: ${roundDate}\n` +
+                  `ลูกค้า: (UID: ${userId})\n` +
+                  `โดย: ${operator} | เวลา: ${notifiedAt}`;
+
+                await fetch("https://api.line.me/v2/bot/message/push", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
+                  },
+                  body: JSON.stringify({
+                    to: process.env.LINE_GROUP_ID,
+                    messages: [{ type: "text", text: groupMessage }],
+                  }),
+                });
+
+                console.log("📩 ส่งแจ้งเตือนไปกลุ่มเรียบร้อย");
+
+                // ✅ บันทึก Log
+                const eventName = `หยุดกด (ลูกค้าได้บัตรเอง) - ${fileName} / รอบ: ${roundDate}`;
+                await logEvent(
+                  eventName,
+                  "Customer",
+                  "-",
+                  "-",
+                  "-",
+                  userId
+                );
+
+                return;
+              }
+            }
+          } catch (err) {
+            console.error(`⚠️ อ่านชีต ${concertName} ไม่ได้:`, err.message);
+          }
+        }
+
+        await replyToLine(event.replyToken, "❌ ไม่พบข้อมูลในระบบค่ะ");
+        continue;
+      }
 
       if (message === "ขอรหัสลูกค้า") {
         await replyToLine(
@@ -357,5 +437,3 @@ app.post("/api/push-line", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-
-
