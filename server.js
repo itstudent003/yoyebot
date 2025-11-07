@@ -348,10 +348,6 @@ app.post("/api/webhook", async (req, res) => {
 
         const thunderData = await thunderRes.json();
         if (!thunderData?.data?.payload) {
-          await replyToLine(
-            event.replyToken,
-            "❌ ไม่สามารถตรวจสอบสลิปได้ค่ะ ลองใหม่อีกครั้ง"
-          );
           continue;
         }
 
