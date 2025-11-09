@@ -170,12 +170,12 @@ app.post("/api/webhook", async (req, res) => {
       const message = event.message.text.trim();
       const userId = event.source.userId;
 
-              if (
-          /สนใจ\s*(สอบถาม|ติดต่อ)?\s*และ\s*จ้าง\s*กดบัตร(ค่ะ|ครับ)?/i.test(
-            message
-          )
-        ) {
-          const replyText = `♡ 𓈒 ᐟ สวัสดีค่า ยินดีต้อนรับสู่บริการกดบัตรยยมือทองนะคะ 🐰💗  
+      if (
+        /สนใจ\s*(สอบถาม|ติดต่อ)?\s*และ\s*จ้าง\s*กดบัตร(ค่ะ|ครับ)?/i.test(
+          message
+        )
+      ) {
+        const replyText = `♡ 𓈒 ᐟ สวัสดีค่า ยินดีต้อนรับสู่บริการกดบัตรยยมือทองนะคะ 🐰💗  
 ขอแจ้งขั้นตอนการรับคิวผ่าน LINE OA ให้ลูกค้าเข้าใจง่ายๆ ก่อนนะคะ ⤵  
 
 ♡ ขั้นตอนการรับคิวกดบัตรผ่าน LINE OA  
@@ -214,10 +214,10 @@ app.post("/api/webhook", async (req, res) => {
 
 พร้อมเริ่มแล้วลูกค้าส่งรายละเอียดงานได้เลยนะคะ 💬🌷`;
 
-          await replyToLine(event.replyToken, replyText);
-          continue;
-        }
-        
+        await replyToLine(event.replyToken, replyText);
+        continue;
+      }
+
       // ✅ เมื่อผู้ใช้พิมพ์ “หยุดกดได้เลย”
       if (/หยุดกดได้เลย/i.test(message)) {
         console.log(`🛑 ผู้ใช้ ${userId} แจ้งหยุดกดแล้ว`);
@@ -323,6 +323,8 @@ app.post("/api/webhook", async (req, res) => {
     else if (event.type === "message" && event.message.type === "image") {
       try {
         const messageId = event.message.id;
+
+        // 1) ดึงภาพจาก LINE
         const imageRes = await fetch(
           `https://api-data.line.me/v2/bot/message/${messageId}/content`,
           { headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}` } }
@@ -330,7 +332,7 @@ app.post("/api/webhook", async (req, res) => {
         if (!imageRes.ok) throw new Error("โหลดรูปจาก LINE ไม่สำเร็จ");
         const buffer = Buffer.from(await imageRes.arrayBuffer());
 
-        // ส่งรูปไปที่ Thunder API
+        // 2) ส่งไปตรวจที่ Thunder
         const formData = new FormData();
         formData.append("file", buffer, {
           filename: "slip.jpg",
@@ -346,26 +348,24 @@ app.post("/api/webhook", async (req, res) => {
           body: formData,
         });
 
-        const thunderData = await thunderRes.json();
-        if (!thunderData?.data?.payload) {
-          continue;
+        const thunderJson = await thunderRes.json().catch(() => null);
+
+        // 3) ถ้าไม่ใช่สลิป (Thunder ไม่มี transRef หรือ status ไม่ 200) → เงียบ ไม่ตอบใด ๆ
+        const isValidSlip =
+          thunderRes.ok &&
+          thunderJson &&
+          thunderJson.status === 200 &&
+          thunderJson.data &&
+          thunderJson.data.transRef;
+
+        if (!isValidSlip) {
+          console.log("⏭️ ข้ามภาพที่ไม่ใช่สลิป");
+          return;
         }
 
-        // ตรวจด้วย payload
-        const payloadRes = await fetch(
-          `https://api.thunder.in.th/v1/verify?payload=${thunderData.data.payload}`,
-          { headers: { Authorization: `Bearer ${THUNDER_API_KEY}` } }
-        );
-        const slipData = await payloadRes.json();
-
-        const transRef = slipData?.data?.transRef;
-        if (!transRef) {
-          await replyToLine(
-            event.replyToken,
-            "❌ ไม่สามารถตรวจสอบสลิปได้ค่ะ ลองใหม่อีกครั้ง"
-          );
-          continue;
-        }
+        // 4) ตรวจชื่อผู้รับและบันทึก
+        const slipData = thunderJson;
+        const transRef = slipData.data.transRef;
 
         // ตรวจซ้ำใน Firebase
         const slipRef = ref(db, `slips/${transRef}`);
@@ -373,35 +373,36 @@ app.post("/api/webhook", async (req, res) => {
         if (snapshot.exists()) {
           await replyToLine(
             event.replyToken,
-            "ขออภัยค่ะ สลิปนี้ไม่สามารถใช้ได้ เพราะเป็นสลิปที่เคยส่งมาแล้วค่ะ"
+            "ขออภัยค่ะ สลิปนี้เคยถูกใช้ตรวจสอบแล้ว ไม่สามารถใช้ซ้ำได้ค่ะ"
           );
-          continue;
+          return;
         }
 
-        // บันทึกสลิปใหม่
-        await set(slipRef, slipData);
+        const receiverNameTh =
+          slipData?.data?.receiver?.account?.name?.th || "";
+        const receiverNameEn =
+          slipData?.data?.receiver?.account?.name?.en || "";
+        const EXPECTED_RECEIVER = /ชฎาธารี\s*บ/i;
 
-        // ส่งข้อความยืนยัน
-        const { amount, date, sender, receiver } = slipData.data;
-
-        const receiverNameTh = receiver?.account?.name?.th || "";
-        const receiverNameEn = receiver?.account?.name?.en || "";
-
-        const isCorrectReceiver = receiverNameTh.includes("น.ส. ชฎาธารี บ");
-
-        if (!isCorrectReceiver) {
+        if (
+          !EXPECTED_RECEIVER.test(receiverNameTh) &&
+          !EXPECTED_RECEIVER.test(receiverNameEn)
+        ) {
           console.warn(
-            "🚫 สลิปนี้ไม่ใช่ของผู้รับที่กำหนด:",
+            "🚫 สลิปผู้รับไม่ถูกต้อง:",
             receiverNameTh || receiverNameEn
           );
           await replyToLine(
             event.replyToken,
-            "❌ ขอโทษค่ะ สลิปนี้ไม่ใช่ของผู้รับที่ถูกต้อง (น.ส. ชฎาธารี บ)\nกรุณาตรวจสอบอีกครั้งค่ะ"
+            "❌ สลิปนี้ไม่ใช่ของผู้รับที่กำหนด (น.ส. ชฎาธารี บ) กรุณาตรวจสอบอีกครั้งค่ะ"
           );
-          continue; // ❗ หยุดการทำงาน ไม่บันทึกลง Firebase
+          return;
         }
 
-        // ✅ ถ้าผู้รับถูกต้อง — บันทึกสลิปและตอบกลับปกติ
+        // ✅ ผ่านทั้งหมด → บันทึกและตอบกลับ
+        await set(slipRef, slipData);
+
+        const { amount, date, sender, receiver } = slipData.data;
         const senderBank = sender?.bank?.short || sender?.bank?.name || "-";
         const senderAcc =
           sender?.account?.bank?.account ||
@@ -417,17 +418,16 @@ app.post("/api/webhook", async (req, res) => {
           timeZone: "Asia/Bangkok",
         });
 
-        const message =
+        const msg =
           `✅ ตรวจสลิปสำเร็จค่ะ\n\n` +
           `📅 วันที่โอน: ${formattedDate}\n` +
-          `💰 ยอดโอน: ${amount?.amount || "-"} บาท\n` +
+          `💰 ยอดโอน: ${amount?.amount ?? "-"} บาท\n` +
           `🏦 จาก: ${senderBank} (${senderAcc})\n` +
           `➡️ ถึง: ${receiverBank} (${receiverAcc})\n` +
-          `👩‍💼 ชื่อผู้รับ: ${receiverNameTh || receiverNameEn}\n` +
-          `🔖 รหัสอ้างอิง: ${slipData.data.transRef}`;
+          `👩‍💼 ผู้รับ: ${receiverNameTh || receiverNameEn}\n` +
+          `🔖 อ้างอิง: ${transRef}`;
 
-        await set(ref(db, `slips/${slipData.data.transRef}`), slipData);
-        await replyToLine(event.replyToken, message);
+        await replyToLine(event.replyToken, msg);
       } catch (err) {
         console.error("❌ ตรวจสลิปล้มเหลว:", err);
         await replyToLine(
