@@ -3,6 +3,7 @@ import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
 import FormData from "form-data";
+import mongoose from "mongoose";
 import { JWT } from "google-auth-library";
 import { google } from "googleapis";
 import { initializeApp } from "firebase/app";
@@ -18,6 +19,7 @@ const LOG_SHEET_ID = process.env.LOG_SHEET_ID;
 const LOG_SHEET_NAME = "Logs";
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 const THUNDER_API_KEY = process.env.THUNDER_API_KEY;
+const MONGO_URI = process.env.MONGO_URI;
 
 // ===== Google Auth =====
 const auth = new JWT({
@@ -40,6 +42,26 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
+
+// ===== MongoDB Setup =====
+mongoose
+  .connect(MONGO_URI, {
+    dbName: "linebot",
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ MongoDB error:", err));
+
+// User schema (LINE users) - เปลี่ยนจาก assignedTo เป็น assignedWorkers array
+const userSchema = new mongoose.Schema({
+  userId: { type: String, unique: true },
+  name: String,
+  picture: String,
+  status: String,
+  assignedWorkers: [{ type: mongoose.Schema.Types.ObjectId, ref: "Worker" }], // เปลี่ยนเป็น array
+});
+const User = mongoose.model("User", userSchema);
 
 // ===== Utilities =====
 async function replyToLine(replyToken, text) {
@@ -151,6 +173,27 @@ async function searchUID(uid, concertName) {
     return `⚠️ ไม่สามารถอ่านข้อมูลคอนเสิร์ต "${concertName}" ได้`;
   }
 }
+async function getUserProfile(userId) {
+  try {
+    const res = await fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
+      headers: {
+        Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
+      },
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error("❌ Error fetching profile:", errorText);
+      return null;
+    }
+
+    const data = await res.json();
+    return data;
+  } catch (err) {
+    console.error("❌ Error fetching profile:", err.message);
+    return null;
+  }
+}
 
 // ===== Express App =====
 const app = express();
@@ -160,16 +203,52 @@ app.get("/api/webhook", (req, res) => {
   res.status(200).send("🟢 LINE Webhook is running!");
 });
 
+// ====== LINE Webhook (รวม user-register + text + image) ======
 app.post("/api/webhook", async (req, res) => {
+  // ตอบ 200 กลับไปก่อน เพื่อไม่ให้ LINE timeout
   res.status(200).send("OK");
-  const events = req.body.events || [];
 
+  const events = req.body.events || [];
   for (const event of events) {
-    // ===== TEXT MESSAGE =====
+    // -----------------------------
+    // A) ลงทะเบียนผู้ใช้ใหม่ (ครั้งแรก)
+    // -----------------------------
+    try {
+      const userId = event?.source?.userId;
+      if (userId) {
+        const exists = await User.exists({ userId });
+        if (!exists) {
+          const profile = await getUserProfile(userId);
+          if (profile) {
+            const user = new User({
+              userId: profile.userId,
+              name: profile.displayName,
+              picture: profile.pictureUrl,
+              status: profile.statusMessage || "",
+              assignedWorkers: [],
+            });
+            await user.save();
+            console.log("✅ บันทึกผู้ใช้ใหม่:", profile.displayName);
+          }
+        } else {
+          console.log("ℹ️ พบ userId ซ้ำ, ไม่บันทึกซ้ำ:", userId);
+        }
+      }
+    } catch (saveErr) {
+      console.error(
+        "❌ Error saving to Mongo (user register):",
+        saveErr.message
+      );
+    }
+
+    // -----------------------------
+    // B) จัดการข้อความตัวอักษร
+    // -----------------------------
     if (event.type === "message" && event.message.type === "text") {
       const message = event.message.text.trim();
       const userId = event.source.userId;
 
+      // คีย์เวิร์ดแนะนำขั้นตอนบริการ
       if (
         /สนใจ\s*(สอบถาม|ติดต่อ)?\s*และ\s*จ้าง\s*กดบัตร(ค่ะ|ครับ)?/i.test(
           message
@@ -213,12 +292,11 @@ app.post("/api/webhook", async (req, res) => {
 ขอบคุณที่ไว้วางใจให้ยยมือทองกดบัตรให้นะคะ 🐰💗  
 
 พร้อมเริ่มแล้วลูกค้าส่งรายละเอียดงานได้เลยนะคะ 💬🌷`;
-
         await replyToLine(event.replyToken, replyText);
         continue;
       }
 
-      // ✅ เมื่อผู้ใช้พิมพ์ “หยุดกดได้เลย”
+      // ผู้ใช้พิมพ์ “หยุดกดได้เลย”
       if (/หยุดกดได้เลย/i.test(message)) {
         console.log(`🛑 ผู้ใช้ ${userId} แจ้งหยุดกดแล้ว`);
 
@@ -237,7 +315,7 @@ app.post("/api/webhook", async (req, res) => {
               if (uidCell === userId) {
                 console.log(`✅ พบ UID ใน ${concertName}, แถว ${i + 2}`);
 
-                // ✅ อัปเดตคอลัมน์ N (หยุดกด)
+                // อัปเดตคอลัมน์ N (หยุดกด)
                 await sheets.spreadsheets.values.update({
                   spreadsheetId: sheetId,
                   range: `N${i + 2}`,
@@ -253,7 +331,7 @@ app.post("/api/webhook", async (req, res) => {
                   timeZone: "Asia/Bangkok",
                 });
 
-                // ✅ แจ้งกลุ่ม LINE
+                // แจ้งกลุ่ม LINE
                 const groupMessage =
                   `[🛑 หยุดกด – ลูกค้าได้บัตรเองแล้ว]\n\n` +
                   `งาน: ${fileName}\n` +
@@ -276,11 +354,11 @@ app.post("/api/webhook", async (req, res) => {
 
                 console.log("📩 ส่งแจ้งเตือนไปกลุ่มเรียบร้อย");
 
-                // ✅ บันทึก Log
+                // บันทึก Log
                 const eventName = `หยุดกด (ลูกค้าได้บัตรเอง) - ${fileName} / รอบ: ${roundDate}`;
                 await logEvent(eventName, "Customer", "-", "-", "-", userId);
 
-                return;
+                return; // จบ loop event นี้
               }
             }
           } catch (err) {
@@ -309,9 +387,8 @@ app.post("/api/webhook", async (req, res) => {
               `ค้นหา U512a89 ใน Blackpink2025\n\n` +
               `ระบบจะตอบกลับโซนที่นั่งและรายละเอียดการจองของ UID นั้นค่ะ 🎟️`
           );
-          return;
+          continue;
         }
-
         const keyword = match[1].trim();
         const targetConcert = match[2]?.trim() || null;
         const result = await searchUID(keyword, targetConcert);
@@ -319,7 +396,9 @@ app.post("/api/webhook", async (req, res) => {
       }
     }
 
-    // ===== IMAGE MESSAGE (ตรวจสลิป) =====
+    // -----------------------------
+    // C) จัดการภาพ (ตรวจสลิปเท่านั้น)
+    // -----------------------------
     else if (event.type === "message" && event.message.type === "image") {
       try {
         const messageId = event.message.id;
@@ -350,7 +429,7 @@ app.post("/api/webhook", async (req, res) => {
 
         const thunderJson = await thunderRes.json().catch(() => null);
 
-        // 3) ถ้าไม่ใช่สลิป (Thunder ไม่มี transRef หรือ status ไม่ 200) → เงียบ ไม่ตอบใด ๆ
+        // 3) ถ้าไม่ใช่สลิป → เงียบ ไม่ตอบใดๆ
         const isValidSlip =
           thunderRes.ok &&
           thunderJson &&
@@ -360,22 +439,26 @@ app.post("/api/webhook", async (req, res) => {
 
         if (!isValidSlip) {
           console.log("⏭️ ข้ามภาพที่ไม่ใช่สลิป");
-          return;
+          continue;
         }
 
-        // 4) ตรวจชื่อผู้รับและบันทึก
+        // 4) ตรวจชื่อผู้รับ + กันสลิปซ้ำ
         const slipData = thunderJson;
         const transRef = slipData.data.transRef;
 
-        // ตรวจซ้ำใน Firebase
         const slipRef = ref(db, `slips/${transRef}`);
         const snapshot = await get(slipRef);
         if (snapshot.exists()) {
           await replyToLine(
             event.replyToken,
-            "ขออภัยค่ะ สลิปนี้เคยถูกใช้ตรวจสอบแล้ว ไม่สามารถใช้ซ้ำได้ค่ะ"
+            `⚠️ สลิปนี้ถูกใช้งานในระบบแล้วค่ะ  
+(This slip has already been used.)  
+
+หากลูกค้าส่งสลิปเดิมซ้ำจากความผิดพลาด  
+สามารถแจ้งแอดมินเพื่อตรวจสอบได้เลยนะคะ 🤍✨  
+(Please contact admin for manual review if needed.)`
           );
-          return;
+          continue;
         }
 
         const receiverNameTh =
@@ -394,9 +477,18 @@ app.post("/api/webhook", async (req, res) => {
           );
           await replyToLine(
             event.replyToken,
-            "❌ สลิปนี้ไม่ใช่ของผู้รับที่กำหนด (น.ส. ชฎาธารี บ) กรุณาตรวจสอบอีกครั้งค่ะ"
+            `❌ ขออภัยค่ะ ยังไม่พบข้อมูลสลิปนี้ในระบบนะคะ  
+(Slip not found in our system.)  
+
+บอทตรวจสอบเฉพาะยอดที่โอนเข้าบัญชีร้านเท่านั้นนะคะ  
+(The system only detects transfers to the official account.)  
+
+หากโอนไปบัญชีอื่นหรือสงสัยเพิ่มเติม  
+แจ้งแอดมินเพื่อตรวจสอบได้เลยค่ะ 🤍✨  
+(Please contact admin for assistance.)`
           );
-          return;
+
+          continue;
         }
 
         // ✅ ผ่านทั้งหมด → บันทึกและตอบกลับ
@@ -408,24 +500,29 @@ app.post("/api/webhook", async (req, res) => {
           sender?.account?.bank?.account ||
           sender?.account?.proxy?.account ||
           "-";
-        const receiverBank =
-          receiver?.bank?.short || receiver?.bank?.name || "-";
-        const receiverAcc =
-          receiver?.account?.bank?.account ||
-          receiver?.account?.proxy?.account ||
-          "-";
-        const formattedDate = new Date(date).toLocaleString("th-TH", {
+        // const receiverBank =
+        //   receiver?.bank?.short || receiver?.bank?.name || "-";
+        // const receiverAcc =
+        //   receiver?.account?.bank?.account ||
+        //   receiver?.account?.proxy?.account ||
+        //   "-";
+        const formattedDate = new Date(date);
+        const dateTH = formattedDate.toLocaleDateString("th-TH", {
+          timeZone: "Asia/Bangkok",
+        });
+        const timeTH = formattedDate.toLocaleTimeString("th-TH", {
           timeZone: "Asia/Bangkok",
         });
 
         const msg =
-          `✅ ตรวจสลิปสำเร็จค่ะ\n\n` +
-          `📅 วันที่โอน: ${formattedDate}\n` +
-          `💰 ยอดโอน: ${amount?.amount ?? "-"} บาท\n` +
-          `🏦 จาก: ${senderBank} (${senderAcc})\n` +
-          `➡️ ถึง: ${receiverBank} (${receiverAcc})\n` +
-          `👩‍💼 ผู้รับ: ${receiverNameTh || receiverNameEn}\n` +
-          `🔖 อ้างอิง: ${transRef}`;
+          `✅ ตรวจสอบสลิปเรียบร้อยค่ะ ♡  \n` +
+          `(Payment verified successfully.)\n\n` +
+          `📅 วันที่โอน: ${dateTH}\n` +
+          `⏰ เวลา: ${timeTH}\n` +
+          `💸 จำนวนเงิน: ${amount?.amount ?? "-"} บาท\n` +
+          `🏦 จากบัญชี:  ${senderBank} (${senderAcc})\n\n` +
+          `ยอดเข้าบัญชีร้านเรียบร้อยแล้วนะคะ ขอบคุณค่ะ 🐰🌷\n ` +
+          `(Your payment has been received. Thank you!)\n `;
 
         await replyToLine(event.replyToken, msg);
       } catch (err) {
@@ -438,6 +535,7 @@ app.post("/api/webhook", async (req, res) => {
     }
   }
 });
+
 app.post("/api/push-line", async (req, res) => {
   try {
     const { uid, message } = req.body;
