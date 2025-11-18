@@ -426,8 +426,9 @@ app.post("/api/webhook", async (req, res) => {
           },
           body: formData,
         });
-
         const thunderJson = await thunderRes.json().catch(() => null);
+        // console.log("SlipData: ", thunderJson);
+        // console.log("Thunder Response OK:", thunderRes.ok);
 
         // 3) ถ้าไม่ใช่สลิป → เงียบ ไม่ตอบใดๆ
         const isValidSlip =
@@ -465,7 +466,7 @@ app.post("/api/webhook", async (req, res) => {
           slipData?.data?.receiver?.account?.name?.th || "";
         const receiverNameEn =
           slipData?.data?.receiver?.account?.name?.en || "";
-        const EXPECTED_RECEIVER = /ชฎาธารี\s*บ/i;
+        const EXPECTED_RECEIVER = /บจก\.\s*โยเย\s*ม/i;
 
         if (
           !EXPECTED_RECEIVER.test(receiverNameTh) &&
