@@ -466,7 +466,7 @@ app.post("/api/webhook", async (req, res) => {
           slipData?.data?.receiver?.account?.name?.th || "";
         const receiverNameEn =
           slipData?.data?.receiver?.account?.name?.en || "";
-        const EXPECTED_RECEIVER = /บจก\.\s*โยเย\s*ม/i;
+        const EXPECTED_RECEIVER = /(บจก\.\s*โยเย\s*ม|YOYE\s*MUETHONG\s*CO\.,?LTD\.?)/i;
 
         if (
           !EXPECTED_RECEIVER.test(receiverNameTh) &&
@@ -576,3 +576,4 @@ app.post("/api/push-line", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
